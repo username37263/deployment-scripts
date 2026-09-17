@@ -117,6 +117,7 @@ if [[ $current == preparing ]]; then
         command -v gcc > "$STATE/compiler"
     fi
     file=NVIDIA-Linux-x86_64-$version.run
+    report downloading "Downloading and checking NVIDIA $version"
     fetch "$BASE/$version/$file.sha256sum" -o "$STATE/checksum"
     expected=$(awk 'NR==1 {print $1}' "$STATE/checksum")
     [[ $expected =~ ^[a-fA-F0-9]{64}$ ]] || fail 'Invalid upstream SHA-256 checksum.'
