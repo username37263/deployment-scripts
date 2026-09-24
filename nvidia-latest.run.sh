@@ -23,6 +23,19 @@ report() {
 phase() { printf '%s\n' "$1" > "$STATE/phase.tmp"; mv "$STATE/phase.tmp" "$STATE/phase"; }
 fail() { trap - ERR; phase failed; report failed "$1"; exit 1; }
 trap 'fail "Installation failed near line $LINENO. Check journalctl -u nvidia-latest-run and /var/log/nvidia-installer.log."' ERR
+# Scope proxy recovery to this installer; keep the host APT configuration intact.
+APT_DIRECT=false
+apt_run() {
+    local opts=(-o DPkg::Lock::Timeout=600 -o Acquire::Retries=3 -o Acquire::Languages=none -o APT::Update::Error-Mode=any)
+    if $APT_DIRECT; then opts+=(-o Acquire::http::Proxy=DIRECT -o Acquire::https::Proxy=DIRECT); fi
+    if apt-get "${opts[@]}" "$@"; then return 0; fi
+    if ! $APT_DIRECT; then
+        report preparing 'Package download failed; retrying directly without the package proxy'
+        APT_DIRECT=true
+        if apt-get "${opts[@]}" -o Acquire::http::Proxy=DIRECT -o Acquire::https::Proxy=DIRECT "$@"; then return 0; fi
+    fi
+    fail "ERROR: Ubuntu package $1 failed. Check repository/proxy connectivity and journalctl -u nvidia-latest-run."
+}
 fetch() { curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 20 --max-time 1800 "$@"; }
 gpu_count() {
     local n=0 d
@@ -49,7 +62,7 @@ if [[ ${1:-} != --resume ]]; then
     [[ $# == 0 ]] || fail 'Usage: sudo bash nvidia-latest.run.sh'
     current=$(cat "$STATE/phase" 2>/dev/null || true)
     case "$current" in preparing|installing|after-nouveau|verifying) echo 'ERROR: an installation is pending. Inspect the service before starting another.'; exit 1;; esac
-    command -v curl >/dev/null || { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates; }
+    command -v curl >/dev/null || { apt_run update; DEBIAN_FRONTEND=noninteractive apt_run install -y curl ca-certificates; }
     metadata=$(fetch "$BASE/latest.txt")
     read -r version relative extra <<< "$metadata"
     [[ $version =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ && $relative == "$version/NVIDIA-Linux-x86_64-$version.run" && -z ${extra:-} ]] || fail 'Unexpected NVIDIA latest.txt format; refusing download.'
@@ -106,12 +119,12 @@ case "$current" in complete) exit 0;; failed) echo 'Previous attempt failed; exp
 if [[ $current == preparing ]]; then
     report preparing "Preparing NVIDIA $version for $(cat "$STATE/expected-gpus") GPUs"
     export DEBIAN_FRONTEND=noninteractive
-    apt-get -o DPkg::Lock::Timeout=600 update
-    apt-get -o DPkg::Lock::Timeout=600 install -y build-essential dkms curl ca-certificates mokutil pkg-config libglvnd-dev "linux-headers-$(uname -r)"
+    apt_run update
+    apt_run install -y build-essential dkms curl ca-certificates mokutil pkg-config libglvnd-dev "linux-headers-$(uname -r)"
     if mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then fail 'Secure Boot enabled; signed-module setup required.'; fi
     compiler=$(sed -nE 's/.*gcc-([0-9]+).*/\1/p' /proc/version)
     if [[ -n $compiler ]]; then
-        apt-get -o DPkg::Lock::Timeout=600 install -y "gcc-$compiler"
+        apt_run install -y "gcc-$compiler"
         printf '%s\n' "/usr/bin/gcc-$compiler" > "$STATE/compiler"
     else
         command -v gcc > "$STATE/compiler"
